@@ -65,6 +65,11 @@ type Cache interface {
 	// UpdateJobStatus puts job in backlog for a while.
 	UpdateJobStatus(job *api.JobInfo, updatePGStatus, updatePGAnnotations, updateJobInfo bool) (*api.JobInfo, error)
 
+	// FlushPodGroupStatus writes only the PodGroup status to the apiserver without
+	// recording any events or updating pod conditions. Use this for immediate
+	// phase flushes (e.g. Pending→Inqueue) that must not produce side-effects.
+	FlushPodGroupStatus(pg *api.PodGroup) (*api.PodGroup, error)
+
 	// UpdateQueueStatus update queue status.
 	UpdateQueueStatus(queue *api.QueueInfo) error
 

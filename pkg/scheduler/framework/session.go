@@ -909,6 +909,14 @@ func (ssn *Session) BindPodGroup(job *api.JobInfo, cluster string) error {
 	return ssn.cache.BindPodGroup(job, cluster)
 }
 
+// FlushPodGroupStatus writes only the job's PodGroup status to the apiserver without
+// recording any events or updating pod conditions. Actions that need to propagate a
+// phase transition immediately (e.g. Pending→Inqueue) before CloseSession should call
+// this method instead of UpdateJobStatus to avoid premature Unschedulable events.
+func (ssn *Session) FlushPodGroupStatus(job *api.JobInfo) (*api.PodGroup, error) {
+	return ssn.cache.FlushPodGroupStatus(job.PodGroup)
+}
+
 // UpdatePodGroupCondition update job condition accordingly.
 func (ssn *Session) UpdatePodGroupCondition(jobInfo *api.JobInfo, cond *scheduling.PodGroupCondition) error {
 	job, ok := ssn.Jobs[jobInfo.UID]

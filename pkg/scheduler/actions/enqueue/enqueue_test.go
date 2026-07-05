@@ -17,14 +17,17 @@ limitations under the License.
 package enqueue
 
 import (
+	"sync/atomic"
 	"testing"
 
 	v1 "k8s.io/api/core/v1"
+	nodeshardv1alpha1 "volcano.sh/apis/pkg/apis/shard/v1alpha1"
 
 	"volcano.sh/apis/pkg/apis/scheduling"
 	schedulingv1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 	"volcano.sh/volcano/cmd/scheduler/app/options"
 	"volcano.sh/volcano/pkg/scheduler/api"
+	"volcano.sh/volcano/pkg/scheduler/cache"
 	"volcano.sh/volcano/pkg/scheduler/conf"
 	"volcano.sh/volcano/pkg/scheduler/framework"
 	"volcano.sh/volcano/pkg/scheduler/plugins/drf"
@@ -34,6 +37,28 @@ import (
 	"volcano.sh/volcano/pkg/scheduler/uthelper"
 	"volcano.sh/volcano/pkg/scheduler/util"
 )
+
+// trackingStatusUpdater is a StatusUpdater that counts UpdatePodGroup calls.
+type trackingStatusUpdater struct {
+	updatePodGroupCalls atomic.Int32
+}
+
+func (t *trackingStatusUpdater) UpdatePodStatus(pod *v1.Pod) (*v1.Pod, error) {
+	return pod, nil
+}
+
+func (t *trackingStatusUpdater) UpdatePodGroup(pg *api.PodGroup) (*api.PodGroup, error) {
+	t.updatePodGroupCalls.Add(1)
+	return pg, nil
+}
+
+func (t *trackingStatusUpdater) UpdateQueueStatus(_ *api.QueueInfo) error {
+	return nil
+}
+
+func (t *trackingStatusUpdater) UpdateNodeShardStatus(ns *nodeshardv1alpha1.NodeShard) (*nodeshardv1alpha1.NodeShard, error) {
+	return ns, nil
+}
 
 func TestEnqueue(t *testing.T) {
 	plugins := map[string]framework.PluginBuilder{
@@ -163,5 +188,96 @@ func TestEnqueue(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+// TestEnqueueImmediateFlush verifies that every PodGroup transitioned to Inqueue during
+// the enqueue action is flushed to the apiserver (via FlushPodGroupStatus→UpdatePodGroup)
+// immediately at the end of Execute, before CloseSession runs, and that only the
+// PodGroup status write is triggered — no Unschedulable events, no pod-condition patches.
+func TestEnqueueImmediateFlush(t *testing.T) {
+	options.Default()
+	framework.RegisterPluginBuilder(drf.PluginName, drf.New)
+	framework.RegisterPluginBuilder(gang.PluginName, gang.New)
+	framework.RegisterPluginBuilder(sla.PluginName, sla.New)
+	framework.RegisterPluginBuilder(proportion.PluginName, proportion.New)
+	defer framework.CleanupPluginBuilders()
+
+	trueValue := true
+	tiers := []conf.Tier{
+		{
+			Plugins: []conf.PluginOption{
+				{
+					Name:               drf.PluginName,
+					EnabledJobOrder:    &trueValue,
+					EnabledJobEnqueued: &trueValue,
+				},
+				{
+					Name:               proportion.PluginName,
+					EnabledQueueOrder:  &trueValue,
+					EnabledJobEnqueued: &trueValue,
+				},
+				{
+					Name: sla.PluginName,
+					Arguments: map[string]interface{}{
+						"sla-waiting-time": "3m",
+					},
+					EnabledJobOrder:    &trueValue,
+					EnabledJobEnqueued: &trueValue,
+				},
+				{
+					Name:            gang.PluginName,
+					EnabledJobOrder: &trueValue,
+				},
+			},
+		},
+	}
+
+	// Two pending PodGroups, both eligible for enqueue.
+	podGroups := []*schedulingv1.PodGroup{
+		util.BuildPodGroup("pg1", "c1", "c1", 1, nil, schedulingv1.PodGroupPending),
+		util.BuildPodGroup("pg2", "c1", "c1", 1, nil, schedulingv1.PodGroupPending),
+	}
+	pods := []*v1.Pod{
+		util.BuildPod("c1", "p1", "", v1.PodPending, api.BuildResourceList("1", "1G"), "pg1", make(map[string]string), make(map[string]string)),
+		util.BuildPod("c1", "p2", "", v1.PodPending, api.BuildResourceList("1", "1G"), "pg2", make(map[string]string), make(map[string]string)),
+	}
+	queues := []*schedulingv1.Queue{
+		util.BuildQueue("c1", 1, api.BuildResourceList("8", "8G")),
+	}
+
+	tracker := &trackingStatusUpdater{}
+	binder := util.NewFakeBinder(0)
+	evictor := util.NewFakeEvictor(0)
+	stop := make(chan struct{})
+	defer close(stop)
+
+	schedulerCache := cache.NewCustomMockSchedulerCache("utmock-scheduler", binder, evictor, tracker, nil, nil)
+	schedulerCache.Run(stop)
+	schedulerCache.WaitForCacheSync(stop)
+
+	for _, pod := range pods {
+		schedulerCache.AddPod(pod)
+	}
+	for _, pg := range podGroups {
+		schedulerCache.AddPodGroupV1beta1(pg)
+	}
+	for _, q := range queues {
+		schedulerCache.AddQueueV1beta1(q)
+	}
+
+	ssn := framework.OpenSession(schedulerCache, tiers, nil)
+	defer framework.CloseSession(ssn)
+
+	action := New()
+	action.Initialize()
+	action.Execute(ssn)
+	action.UnInitialize()
+
+	// After Execute returns (and before CloseSession), the Inqueue status must
+	// already have been flushed to the apiserver for every newly enqueued job.
+	got := int(tracker.updatePodGroupCalls.Load())
+	if got != 2 {
+		t.Errorf("expected UpdatePodGroup to be called 2 times during Execute (one per enqueued job), got %d", got)
 	}
 }

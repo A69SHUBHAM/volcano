@@ -1709,6 +1709,13 @@ func (sc *SchedulerCache) UpdateJobStatus(job *schedulingapi.JobInfo, updatePGSt
 	return job, nil
 }
 
+// FlushPodGroupStatus writes only the PodGroup status to the apiserver.
+// Unlike UpdateJobStatus it does NOT call RecordJobStatusEvent, so no
+// Unschedulable events or pod-condition patches are emitted.
+func (sc *SchedulerCache) FlushPodGroupStatus(pg *schedulingapi.PodGroup) (*schedulingapi.PodGroup, error) {
+	return sc.StatusUpdater.UpdatePodGroup(pg)
+}
+
 func (sc *SchedulerCache) updateJobAnnotations(job *schedulingapi.JobInfo) {
 	sc.Mutex.Lock()
 	defer sc.Mutex.Unlock()

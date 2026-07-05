@@ -78,6 +78,12 @@ func (enqueue *Action) Execute(ssn *framework.Session) {
 
 	klog.V(3).Infof("Try to enqueue PodGroup to %d Queues", len(jobsMap))
 
+	// enqueuedJobs collects every job transitioned Pending→Inqueue in this cycle.
+	// After the loop we flush their status to the apiserver immediately so that
+	// job controllers (vc-controller-manager, PyTorchJob operator, …) can react
+	// without waiting for CloseSession to finish the remaining actions.
+	var enqueuedJobs []*api.JobInfo
+
 	for {
 		if queues.Empty() {
 			break
@@ -96,10 +102,26 @@ func (enqueue *Action) Execute(ssn *framework.Session) {
 			ssn.JobEnqueued(job)
 			job.PodGroup.Status.Phase = scheduling.PodGroupInqueue
 			ssn.Jobs[job.UID] = job
+			enqueuedJobs = append(enqueuedJobs, job)
 		}
 
 		// Added Queue back until no job in Queue.
 		queues.Push(queue)
+	}
+
+	// Flush Inqueue status to the apiserver for every job that was just enqueued.
+	// FlushPodGroupStatus calls only StatusUpdater.UpdatePodGroup; it deliberately
+	// does NOT call RecordJobStatusEvent, preventing premature Unschedulable events
+	// and pod-condition patches that belong to the CloseSession reconciliation path.
+	for _, job := range enqueuedJobs {
+		pg, err := ssn.FlushPodGroupStatus(job)
+		if err != nil {
+			klog.Errorf("Failed to flush PodGroup <%s/%s> status to Inqueue: %v",
+				job.Namespace, job.Name, err)
+			continue
+		}
+		// Keep the in-session snapshot consistent with what the apiserver accepted.
+		job.PodGroup = pg
 	}
 }
 
