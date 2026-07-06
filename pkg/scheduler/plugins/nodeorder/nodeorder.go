@@ -323,7 +323,10 @@ func (pp *NodeOrderPlugin) NodeOrderFn(task *api.TaskInfo, node *api.NodeInfo, k
 
 		// Score from each plugin is multiplied by its configured weight before being added to the total.
 		nodeScore += float64(score) * float64(p.weight)
-		klog.V(5).Infof("Node: %s, task<%s/%s> %s weight %d, score: %f", node.Name, task.Namespace, task.Name, name, p.weight, float64(score)*float64(p.weight))
+		// Score from each plugin is multiplied by its configured weight before being added to the total.
+		weightedScore := float64(score) * float64(p.weight)
+		nodeScore += weightedScore
+		klog.V(5).Infof("Node: %s, task<%s/%s> plugin %s weight %d, raw score: %d, weighted score: %f", node.Name, task.Namespace, task.Name, name, p.weight, score, weightedScore)
 	}
 	klog.V(4).Infof("Nodeorder Total Score for task<%s/%s> on node %s is: %f", task.Namespace, task.Name, node.Name, nodeScore)
 	return nodeScore, nil
